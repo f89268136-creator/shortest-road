@@ -1,0 +1,608 @@
+import threading
+
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+
+import data
+import geo
+import network
+import structures
+from algorithms import dijkstra, bfs_min_stops, prim_mst
+from data import (CITIES, ROADS, ROUTE_POINTS, ROUTE_CURVES,
+                  CITY_NAMES, ROAD_PAIRS, AK_PLACEHOLDER,
+                  city_index, contains)
+
+
+class App:
+    def __init__(self, root, graph, ak=""):
+        self.root = root
+        self.graph = graph
+        self.ak = ak
+        self.source = "未加载路网"
+        self.panel_shown = True
+        root.title("城市路网规划系统")
+        root.geometry("1280x840")
+
+        body = tk.Frame(root, bg="#f2f5f9")
+        body.pack(fill="both", expand=True, padx=8, pady=(8, 2))
+        names = [CITIES[i][0] for i in range(len(CITIES))]
+
+        bar = tk.Frame(body, bg="#ffffff", width=36,
+                       highlightthickness=1, highlightbackground="#d4dde8")
+        bar.pack(side="left", fill="y")
+        bar.pack_propagate(False)
+        self.btn_toggle = tk.Button(bar, text="◀", command=self.toggle_panel,
+                                    font=("Microsoft YaHei", 10), relief="flat",
+                                    bg="#ffffff", fg="#0078d4", width=3)
+        self.btn_toggle.pack(pady=(8, 12))
+        for txt, cmd in (("最短", self.on_shortest), ("经停", self.on_bfs),
+                         ("清空", self.reset_highlight)):
+            tk.Button(bar, text=txt, command=cmd, font=("Microsoft YaHei", 9),
+                      relief="flat", bg="#ffffff", fg="#4a5a6e", width=3).pack(pady=2)
+
+        panel = tk.Frame(body, bg="#ffffff", width=330,
+                         highlightthickness=1, highlightbackground="#d4dde8")
+        panel.pack(side="left", fill="y")
+        panel.pack_propagate(False)
+        self.panel = panel
+        tk.Label(panel, text="城市路网规划系统", font=("Microsoft YaHei", 13, "bold"),
+                 bg="#ffffff", fg="#0078d4").pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(panel, text="基于图与四种数据结构的城市路网规划",
+                 font=("Microsoft YaHei", 9), bg="#ffffff", fg="#8a97a8").pack(anchor="w", padx=14)
+
+        def sec(txt):
+            tk.Label(panel, text=txt, font=("Microsoft YaHei", 9, "bold"),
+                     bg="#ffffff", fg="#4a5a6e").pack(anchor="w", padx=14, pady=(10, 4))
+
+        sec("路线规划")
+        f1 = tk.Frame(panel, bg="#ffffff")
+        f1.pack(fill="x", padx=14)
+        tk.Label(f1, text="出发", font=("Microsoft YaHei", 9), bg="#ffffff",
+                 width=4, anchor="w").grid(row=0, column=0, sticky="w")
+        self.combo_from = ttk.Combobox(f1, values=names, state="readonly", width=22)
+        self.combo_from.grid(row=0, column=1, sticky="w", pady=2)
+        tk.Label(f1, text="途经", font=("Microsoft YaHei", 9), bg="#ffffff",
+                 width=4, anchor="w").grid(row=1, column=0, sticky="w")
+        self.combo_via = ttk.Combobox(f1, values=["（不途经）"] + names,
+                                      state="readonly", width=22)
+        self.combo_via.set("（不途经）")
+        self.combo_via.grid(row=1, column=1, sticky="w", pady=2)
+        tk.Label(f1, text="到达", font=("Microsoft YaHei", 9), bg="#ffffff",
+                 width=4, anchor="w").grid(row=2, column=0, sticky="w")
+        self.combo_to = ttk.Combobox(f1, values=names, state="readonly", width=22)
+        self.combo_to.grid(row=2, column=1, sticky="w", pady=2)
+        f2 = tk.Frame(panel, bg="#ffffff")
+        f2.pack(fill="x", padx=14, pady=(8, 0))
+        tk.Button(f2, text="最短路径", command=self.on_shortest,
+                  font=("Microsoft YaHei", 10), bg="#0078d4", fg="white",
+                  activebackground="#106ebe", activeforeground="white",
+                  relief="flat").pack(side="left", fill="x", expand=True)
+        tk.Button(f2, text="最少经停", command=self.on_bfs,
+                  font=("Microsoft YaHei", 10), bg="#1f9d55", fg="white",
+                  activebackground="#188a4a", activeforeground="white",
+                  relief="flat").pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        tk.Label(panel, text="最佳路线", font=("Microsoft YaHei", 9, "bold"),
+                 bg="#ffffff", fg="#4a5a6e").pack(anchor="w", padx=14, pady=(10, 2))
+        self.result = tk.Text(panel, height=10, font=("Microsoft YaHei", 9),
+                              state="disabled", bg="#f7fafd", relief="flat",
+                              highlightthickness=1, highlightbackground="#e3ebf3")
+        self.result.pack(fill="x", padx=14)
+
+        sec("路网规划")
+        f3 = tk.Frame(panel, bg="#ffffff")
+        f3.pack(fill="x", padx=14)
+        tk.Button(f3, text="最省钱公路网", command=self.on_prim,
+                  font=("Microsoft YaHei", 9), relief="flat").pack(fill="x", pady=2)
+        tk.Button(f3, text="查看路网结构", command=self.on_adjacency,
+                  font=("Microsoft YaHei", 9), relief="flat").pack(fill="x", pady=2)
+
+        sec("数据")
+        tk.Button(panel, text="重新导入真实路网", command=self.on_import_real,
+                  font=("Microsoft YaHei", 9), bg="#8b5cf6", fg="white",
+                  activebackground="#7c4ce0", activeforeground="white",
+                  relief="flat").pack(fill="x", padx=14, pady=2)
+
+        sec("道路编辑")
+        f4 = tk.Frame(panel, bg="#ffffff")
+        f4.pack(fill="x", padx=14)
+        tk.Label(f4, text="城市A", font=("Microsoft YaHei", 9), bg="#ffffff",
+                 width=4, anchor="w").grid(row=0, column=0, sticky="w")
+        self.combo_a = ttk.Combobox(f4, values=names, state="readonly", width=14)
+        self.combo_a.grid(row=0, column=1, sticky="w", pady=2)
+        tk.Label(f4, text="城市B", font=("Microsoft YaHei", 9), bg="#ffffff",
+                 width=4, anchor="w").grid(row=1, column=0, sticky="w")
+        self.combo_b = ttk.Combobox(f4, values=names, state="readonly", width=14)
+        self.combo_b.grid(row=1, column=1, sticky="w", pady=2)
+        tk.Label(f4, text="里程", font=("Microsoft YaHei", 9), bg="#ffffff",
+                 width=4, anchor="w").grid(row=2, column=0, sticky="w")
+        self.entry_km = tk.Entry(f4, width=14)
+        self.entry_km.grid(row=2, column=1, sticky="w", pady=2)
+        f5 = tk.Frame(panel, bg="#ffffff")
+        f5.pack(fill="x", padx=14, pady=(6, 2))
+        tk.Button(f5, text="添加道路", command=self.on_add_road,
+                  font=("Microsoft YaHei", 9), relief="flat").pack(side="left", fill="x", expand=True)
+        tk.Button(f5, text="删除该道路", command=self.on_delete_road,
+                  font=("Microsoft YaHei", 9), relief="flat").pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        right = tk.Frame(body, bg="#f2f5f9")
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        self.right = right
+        toolbar = tk.Frame(right, bg="#f6f9fc")
+        toolbar.pack(side="bottom", fill="x")
+        tk.Button(toolbar, text="＋", command=self.zoom_in, width=3,
+                  relief="flat", bg="#ffffff", font=("Microsoft YaHei", 10)).pack(side="left", pady=4, padx=(4, 2))
+        tk.Button(toolbar, text="－", command=self.zoom_out, width=3,
+                  relief="flat", bg="#ffffff", font=("Microsoft YaHei", 10)).pack(side="left", pady=4, padx=2)
+        tk.Button(toolbar, text="重置视图", command=self.zoom_reset,
+                  relief="flat", bg="#ffffff", font=("Microsoft YaHei", 9)).pack(side="left", pady=4, padx=2)
+        tk.Label(toolbar, text="滚轮缩放地图 · 点击 ◀ 收起侧边栏",
+                 bg="#f6f9fc", fg="#8a97a8", font=("Microsoft YaHei", 9)).pack(side="left", padx=8)
+        self.canvas = tk.Canvas(right, bg="#f6f9fc",
+                                highlightthickness=1, highlightbackground="#c9d6e5")
+        self.canvas.pack(fill="both", expand=True)
+        self.hover = None
+        self.curves = {}
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.canvas.bind("<Leave>", self.on_leave)
+        self.canvas.bind("<MouseWheel>", self.on_wheel)
+
+        self.status = tk.Label(root, text="", font=("Microsoft YaHei", 9),
+                               fg="#666", anchor="w")
+        self.status.pack(fill="x", padx=12, pady=(0, 6))
+        self.update_status()
+        self.draw_graph()
+        self.root.after(200, self.start_import)
+
+    def toggle_panel(self):
+        if self.panel_shown:
+            self.panel.pack_forget()
+            self.btn_toggle.config(text="▶")
+            self.panel_shown = False
+        else:
+            self.panel.pack(side="left", fill="y", before=self.right)
+            self.btn_toggle.config(text="◀")
+            self.panel_shown = True
+
+    def zoom_in(self):
+        w = max(1, self.canvas.winfo_width())
+        h = max(1, self.canvas.winfo_height())
+        geo.zoom_around(w / 2.0, h / 2.0, 1.3)
+        self.draw_graph()
+
+    def zoom_out(self):
+        w = max(1, self.canvas.winfo_width())
+        h = max(1, self.canvas.winfo_height())
+        geo.zoom_around(w / 2.0, h / 2.0, 1.0 / 1.3)
+        self.draw_graph()
+
+    def zoom_reset(self):
+        geo.reset_view()
+        self.draw_graph()
+
+    def on_wheel(self, event):
+        factor = 1.12 ** (event.delta / 120.0)
+        geo.zoom_around(event.x, event.y, factor)
+        self.draw_graph()
+
+    def update_status(self):
+        total_links = 0
+        for u in range(self.graph.n):
+            total_links += self.graph.adj[u].size()
+        km = self.graph.total_km()
+        conn = "连通" if self.graph.is_connected() else "不连通"
+        self.status.config(text="数据源：%s    城市：%d 个    公路：%d 条    链表节点：%d    公路总里程：%d 公里    路网：%s    红=最短路径  绿=最省钱公路网"
+                                 % (self.source, self.graph.n, self.graph.edge_num, total_links, km, conn))
+
+    def edge_curve_points(self, u, v):
+        a_name = CITIES[u][0]
+        b_name = CITIES[v][0]
+        stops = None
+        if (a_name, b_name) in ROUTE_CURVES:
+            stops = ROUTE_CURVES[(a_name, b_name)]
+        elif (b_name, a_name) in ROUTE_CURVES:
+            stops = list(ROUTE_CURVES[(b_name, a_name)])
+            stops.reverse()
+        pts = [geo.canvas_xy(u)]
+        if stops is not None:
+            for name in stops:
+                lon, lat = ROUTE_POINTS[name]
+                pts.append(geo.lonlat_xy(lon, lat))
+        pts.append(geo.canvas_xy(v))
+        return geo.catmull_rom(pts)
+
+    def draw_graph(self, path=None, mst_edges=None):
+        c = self.canvas
+        c.delete("all")
+        self.hover = None
+        self.curves = {}
+        pedges = []
+        if path is not None:
+            for i in range(len(path) - 1):
+                a, b = path[i], path[i + 1]
+                if a < b:
+                    pedges.append((a, b))
+                else:
+                    pedges.append((b, a))
+        for u in range(self.graph.n):
+            p = self.graph.adj[u].head
+            seen = {}
+            while p is not None:
+                v = p.city
+                if u < v:
+                    seq = seen.get(v, 0) + 1
+                    seen[v] = seq
+                    if seq == 1:
+                        curve = self.edge_curve_points(u, v)
+                        self.curves[(u, v)] = curve
+                        c.create_line(geo.flatten_pts(curve), fill="#ffffff", width=7,
+                                      smooth=True, tags=("edge", "base", "e_%d_%d" % (u, v)))
+                        c.create_line(geo.flatten_pts(curve), fill="#9db4c9", width=2.5,
+                                      smooth=True, tags=("edge", "e_%d_%d" % (u, v)))
+                    else:
+                        a = geo.canvas_xy(u)
+                        b = geo.canvas_xy(v)
+                        dx = b[0] - a[0]
+                        dy = b[1] - a[1]
+                        L = (dx * dx + dy * dy) ** 0.5
+                        if L < 1e-6:
+                            nx, ny = 0.0, -1.0
+                        else:
+                            nx = -dy / L
+                            ny = dx / L
+                        off = 7.0 if seq % 2 == 0 else -7.0
+                        xa = a[0] + nx * off
+                        ya = a[1] + ny * off
+                        xb = b[0] + nx * off
+                        yb = b[1] + ny * off
+                        c.create_line(xa, ya, xb, yb, fill="#ffffff", width=5,
+                                      tags=("edge", "base", "e_%d_%d" % (u, v)))
+                        c.create_line(xa, ya, xb, yb, fill="#9db4c9", width=2,
+                                      tags=("edge", "e_%d_%d" % (u, v)))
+                p = p.next
+        if mst_edges is not None:
+            for u, v in mst_edges:
+                curve = self.curves.get((u, v))
+                if curve is None:
+                    curve = self.edge_curve_points(u, v)
+                c.create_line(geo.flatten_pts(curve), fill="#b5e6c8", width=10,
+                              capstyle="round", joinstyle="round")
+                c.create_line(geo.flatten_pts(curve), fill="#1f9d55", width=4,
+                              capstyle="round", joinstyle="round")
+        if path is not None:
+            for u, v in pedges:
+                curve = self.curves.get((u, v))
+                if curve is None:
+                    curve = self.edge_curve_points(u, v)
+                c.create_line(geo.flatten_pts(curve), fill="#f9c4bf", width=10,
+                              capstyle="round", joinstyle="round")
+                c.create_line(geo.flatten_pts(curve), fill="#e5342e", width=4,
+                              capstyle="round", joinstyle="round")
+        for i in range(self.graph.n):
+            x, y = geo.canvas_xy(i)
+            name = CITIES[i][0]
+            c.create_oval(x - 8, y - 8, x + 8, y + 8,
+                          fill="#2e7ddb", outline="#ffffff", width=2)
+            c.create_text(x, y + 16, text=name,
+                          font=("Microsoft YaHei", 9), fill="#274b68")
+            if path is not None and contains(path, i):
+                c.create_oval(x - 11, y - 11, x + 11, y + 11,
+                              outline="#f59e0b", width=2)
+        c.create_rectangle(12, 12, 178, 88, fill="#ffffff", outline="#b8c8d8")
+        c.create_line(20, 26, 44, 26, fill="#e5342e", width=4)
+        c.create_text(52, 26, text="最短路径", anchor="w",
+                      font=("Microsoft YaHei", 9), fill="#333")
+        c.create_line(20, 46, 44, 46, fill="#1f9d55", width=4)
+        c.create_text(52, 46, text="最省钱公路网", anchor="w",
+                      font=("Microsoft YaHei", 9), fill="#333")
+        c.create_line(20, 66, 44, 66, fill="#ffffff", width=7)
+        c.create_line(20, 66, 44, 66, fill="#9db4c9", width=2.5)
+        c.create_text(52, 66, text="普通公路（悬停查看道路）", anchor="w",
+                      font=("Microsoft YaHei", 9), fill="#333")
+
+    def _style_edge(self, u, v, fill, width):
+        ids = self.canvas.find_withtag("e_%d_%d" % (u, v))
+        for iid in ids:
+            if "base" in self.canvas.gettags(iid):
+                self.canvas.itemconfig(iid, fill="#ffffff")
+            else:
+                self.canvas.itemconfig(iid, fill=fill, width=width)
+
+    def on_motion(self, event):
+        if self.graph.n == 0 or len(self.curves) == 0:
+            return
+        x, y = event.x, event.y
+        best = None
+        best_d = 14.0
+        for (u, v), curve in self.curves.items():
+            d = geo.dist_to_polyline(x, y, curve)
+            if d < best_d:
+                best_d = d
+                best = (u, v)
+        if best == self.hover:
+            return
+        if self.hover is not None:
+            hu, hv = self.hover
+            self._style_edge(hu, hv, "#9db4c9", 2)
+        self.hover = best
+        if best is not None:
+            u, v = best
+            ds = self.graph.edges_between(u, v)
+            self._style_edge(u, v, "#f59e0b", 4)
+            self.status.config(text="道路：%s — %s    里程：%s 公里（%d 条平行路）"
+                                     % (CITIES[u][0], CITIES[v][0],
+                                        "/".join(str(d) for d in ds), len(ds)))
+        else:
+            self.update_status()
+
+    def on_leave(self, event):
+        if self.hover is not None:
+            u, v = self.hover
+            self._style_edge(u, v, "#9db4c9", 2)
+            self.hover = None
+            self.update_status()
+
+    def show_result(self, text):
+        self.result.config(state="normal")
+        self.result.delete("1.0", "end")
+        self.result.insert("end", text)
+        self.result.config(state="disabled")
+
+    def _path_report(self, path):
+        segs = []
+        names = []
+        for k in range(len(path) - 1):
+            u = path[k]
+            v = path[k + 1]
+            names.append(CITIES[u][0])
+            segs.append("  %d. %s → %s   %d 公里"
+                        % (k + 1, CITIES[u][0], CITIES[v][0], self.graph.get_weight(u, v)))
+        names.append(CITIES[path[-1]][0])
+        return " → ".join(names), "\n".join(segs)
+
+    def on_shortest(self):
+        a = self.combo_from.get()
+        b = self.combo_to.get()
+        if a == "" or b == "" or a == b:
+            messagebox.showwarning("提示", "请选择两个不同的城市")
+            return
+        ia = city_index(a)
+        ib = city_index(b)
+        via_name = self.combo_via.get()
+        via = -1
+        if via_name != "" and via_name != "（不途经）":
+            via = city_index(via_name)
+            if via < 0 or via == ia or via == ib:
+                messagebox.showwarning("提示", "途经城市需为路网中且不同于出发/到达城市")
+                return
+        if via < 0:
+            path, dist = dijkstra(self.graph, ia, ib)
+            title = "最短路线（Dijkstra）"
+            if path is None:
+                self.show_result("从 %s 到 %s 目前没有可通行的道路" % (a, b))
+                self.draw_graph()
+                return
+        else:
+            p1, d1 = dijkstra(self.graph, ia, via)
+            if p1 is None:
+                self.show_result("途经 %s 时，%s → %s 没有可通行的道路" % (via_name, a, b))
+                self.draw_graph()
+                return
+            ban = set(p1[:-1])
+            p2, d2 = dijkstra(self.graph, via, ib, ban)
+            if p2 is None:
+                self.show_result("不存在从 %s 经 %s 到 %s 且不重复经过任何城市或道路的路径"
+                                 % (a, via_name, b))
+                self.draw_graph()
+                return
+            path = p1 + p2[1:]
+            dist = d1 + d2
+            title = "最短路线（Dijkstra · 途经 %s）" % via_name
+        names, segs = self._path_report(path)
+        line = "─" * 26
+        self.show_result("%s\n%s\n总里程 %d 公里 · 途经 %d 个中转 · 全程不重复\n%s\n%s"
+                         % (title, names, dist, len(path) - 2, line, segs))
+        self.draw_graph(path)
+
+    def on_bfs(self):
+        a = self.combo_from.get()
+        b = self.combo_to.get()
+        if a == "" or b == "" or a == b:
+            messagebox.showwarning("提示", "请选择两个不同的城市")
+            return
+        ia = city_index(a)
+        ib = city_index(b)
+        via_name = self.combo_via.get()
+        via = -1
+        if via_name != "" and via_name != "（不途经）":
+            via = city_index(via_name)
+            if via < 0 or via == ia or via == ib:
+                messagebox.showwarning("提示", "途经城市需为路网中且不同于出发/到达城市")
+                return
+        if via < 0:
+            path, stops = bfs_min_stops(self.graph, ia, ib)
+            title = "最少经停路线（BFS）"
+            if path is None:
+                self.show_result("从 %s 到 %s 目前没有可通行的道路" % (a, b))
+                self.draw_graph()
+                return
+        else:
+            p1, s1 = bfs_min_stops(self.graph, ia, via)
+            if p1 is None:
+                self.show_result("途经 %s 时，%s → %s 没有可通行的道路" % (via_name, a, b))
+                self.draw_graph()
+                return
+            ban = set(p1[:-1])
+            p2, s2 = bfs_min_stops(self.graph, via, ib, ban)
+            if p2 is None:
+                self.show_result("不存在从 %s 经 %s 到 %s 且不重复经过任何城市或道路的路径"
+                                 % (a, via_name, b))
+                self.draw_graph()
+                return
+            path = p1 + p2[1:]
+            stops = s1 + s2
+            title = "最少经停路线（BFS · 途经 %s）" % via_name
+        names, segs = self._path_report(path)
+        line = "─" * 26
+        self.show_result("%s\n%s\n经停 %d 段 · 全程不重复 · 不保证总里程最短\n%s\n%s"
+                         % (title, names, stops, line, segs))
+        self.draw_graph(path)
+
+    def on_prim(self):
+        mst_edges, total = prim_mst(self.graph)
+        if mst_edges is None:
+            self.show_result("当前路网不连通，无法用一条公路网覆盖所有城市")
+            self.draw_graph()
+            return
+        names = []
+        for u, v in mst_edges:
+            names.append("%s — %s（%d 公里）"
+                         % (CITIES[u][0], CITIES[v][0], self.graph.get_weight(u, v)))
+        self.show_result("最省钱公路网（Prim 最小生成树）：\n%s\n总里程：%d 公里\n"
+                         "即用总里程最少的公路把所有城市连通"
+                         % ("\n".join(names), total))
+        self.draw_graph(None, mst_edges)
+
+    def on_adjacency(self):
+        self.show_result("当前路网结构（邻接表，链表存储）：\n%s"
+                         % self.graph.adjacency_text())
+        self.draw_graph()
+
+    def on_add_road(self):
+        a = self.combo_a.get()
+        b = self.combo_b.get()
+        km_str = self.entry_km.get().strip()
+        if a == "" or b == "" or km_str == "":
+            messagebox.showwarning("提示", "请选择两个城市并填写里程")
+            return
+        if a == b:
+            messagebox.showwarning("提示", "两个城市不能相同")
+            return
+        try:
+            km = int(km_str)
+        except ValueError:
+            messagebox.showwarning("提示", "里程必须是整数（公里）")
+            return
+        if km <= 0:
+            messagebox.showwarning("提示", "里程必须大于 0")
+            return
+        ia = city_index(a)
+        ib = city_index(b)
+        self.graph.set_edge(ia, ib, km)
+        cnt = len(self.graph.edges_between(ia, ib))
+        self.update_status()
+        self.draw_graph()
+        if cnt > 1:
+            self.show_result("已添加道路：%s — %s，里程 %d 公里\n"
+                             "该路段现有 %d 条平行路（图上错位显示）。\n"
+                             "Dijkstra / Prim 自动选取其中里程最短的一条。"
+                             % (a, b, km, cnt))
+        else:
+            self.show_result("已添加道路：%s — %s，里程 %d 公里\n可重新选择城市查询。" % (a, b, km))
+
+    def on_delete_road(self):
+        a = self.combo_a.get()
+        b = self.combo_b.get()
+        if a == "" or b == "" or a == b:
+            messagebox.showwarning("提示", "请选择两个不同的城市")
+            return
+        ia = city_index(a)
+        ib = city_index(b)
+        if self.graph.delete_edge(ia, ib):
+            cnt = len(self.graph.edges_between(ia, ib))
+            self.update_status()
+            self.draw_graph()
+            if cnt > 0:
+                self.show_result("已删除一条道路：%s — %s（该路段剩余 %d 条平行路）" % (a, b, cnt))
+            else:
+                self.show_result("已删除道路：%s — %s" % (a, b))
+        else:
+            self.show_result("道路 %s — %s 不存在，无需删除" % (a, b))
+
+    def reset_highlight(self):
+        self.draw_graph()
+        self.show_result("已清空高亮。可选择出发/到达城市后点击“最短路径”或“最少经停”。")
+
+    def refresh_names(self):
+        names = [CITIES[i][0] for i in range(len(CITIES))]
+        self.combo_from["values"] = names
+        self.combo_to["values"] = names
+        self.combo_via["values"] = ["（不途经）"] + names
+        self.combo_via.set("（不途经）")
+        self.combo_a["values"] = names
+        self.combo_b["values"] = names
+
+    def start_import(self):
+        cache = network._load_cache()
+        if cache is not None:
+            self._import_done(cache + (0,),
+                              ["已从本地缓存加载路网（road_network_cache.json），"
+                               "无需重新请求百度接口"])
+            return
+        self.on_import_real()
+
+    def on_import_real(self):
+        ak = self.ak.strip()
+        if ak == "" or ak == AK_PLACEHOLDER:
+            ak = simpledialog.askstring(
+                "百度地图 AK",
+                "请在 data.py 顶部把 BAIDU_AK 常量改为你的百度地图开放平台 AK；\n"
+                "或在此临时输入本次使用（lbsyun.baidu.com 免费申请）：",
+                parent=self.root, initialvalue="")
+            if ak is None or ak.strip() == "":
+                self.show_result("未导入路网：需要百度地图 AK。\n"
+                                 "获取方式：lbsyun.baidu.com 注册应用后复制 AK，"
+                                 "填入 data.py 顶部 BAIDU_AK = \"...\"，重启程序即可自动导入真实路网。")
+                return
+            ak = ak.strip()
+        self.do_import(ak)
+
+    def do_import(self, ak):
+        self.ak = ak
+        self.import_done = False
+        self.import_result = None
+        self.import_lines = []
+        self.show_result("正在从百度地图并行拉取真实路网（%d 城 / %d 路，约需 30~80 秒），界面保持可用…"
+                         % (len(CITY_NAMES), len(ROAD_PAIRS)))
+        self.status.config(text="数据源：%s    正在导入真实路网…" % self.source)
+        self.root.update()
+        t = threading.Thread(target=self._import_worker, args=(ak,), daemon=True)
+        t.start()
+        self.root.after(100, self._poll_import)
+
+    def _import_worker(self, ak):
+        lines = []
+        result = network.fetch_real_network(ak, lines.append)
+        self.import_result = result
+        self.import_lines = lines
+        self.import_done = True
+
+    def _poll_import(self):
+        if not self.import_done:
+            self.root.after(100, self._poll_import)
+            return
+        self._import_done(self.import_result, self.import_lines)
+
+    def _import_done(self, result, lines):
+        if result is None:
+            self.show_result("\n".join(lines))
+            self.update_status()
+            return
+        new_cities, new_roads, new_points, new_curves, fail = result
+        CITIES[:] = new_cities
+        ROADS[:] = new_roads
+        ROUTE_POINTS.clear()
+        ROUTE_POINTS.update(new_points)
+        ROUTE_CURVES.clear()
+        ROUTE_CURVES.update(new_curves)
+        geo.reset_view()
+        self.graph = structures.build_graph()
+        self.source = "百度真实路网"
+        self.refresh_names()
+        self.update_status()
+        self.draw_graph()
+        network._save_cache(new_cities, new_roads, new_points, new_curves)
+        self.show_result("已导入百度真实路网并基于导入数据建模（源码不含任何虚构数值）\n%s\n\n"
+                         "真实城市 %d 个、真实公路 %d 条（%d 条获取失败已跳过）\n"
+                         "路网已缓存到 road_network_cache.json，下次启动将秒级加载"
+                         % ("\n".join(lines), len(new_cities), len(new_roads), fail))
